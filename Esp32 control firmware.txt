@@ -1,0 +1,1278 @@
+// ====================== FEATURES ======================
+// Put // in front of any line to remove that feature.
+#define USE_PINS        // Set/Read Digital, Analog and PWM pins, blink, analog sensors
+#define USE_SERVO       // Servo (up to 8)
+#define USE_RFID        // RFID reader (MFRC522)
+#define USE_ULTRASONIC  // Ultrasonic distance sensor
+#define USE_BUZZER      // Passive buzzer (notes / frequency / melodies)
+#define USE_RGB         // RGB LED
+#define USE_LCD         // I2C LCD 16x2
+#define USE_OLED        // SSD1306 128x64 OLED
+#define USE_MATRIX8X8   // MAX7219 8x8 LED matrix (built-in driver, no library needed)
+#define USE_TM1637      // TM1637 4-digit display
+#define USE_JOYSTICK    // Joystick
+#define USE_KEYPAD      // 4x4 keypad
+#define USE_NEOPIXEL    // NeoPixel strip + effects
+#define USE_ROTARY      // Rotary encoder
+#define USE_IR          // IR receiver
+#define USE_DFPLAYER    // DFPlayer Mini (audio)
+#define USE_DHT         // DHT11 / DHT22
+#define USE_DS18B20     // DS18B20 temperature
+#define USE_BME         // BMP280 / BME280 pressure, altitude, temperature, humidity
+#define USE_TCS34725    // TCS34725 color sensor
+#define USE_APDS9960    // APDS9960 gesture + proximity
+#define USE_HX711       // HX711 scale
+#define USE_GPS         // NEO-6M GPS
+#define USE_RTC         // DS3231 clock
+#define USE_NTP         // Time from the internet
+#define USE_HTTP        // HTTP GET
+#define USE_ESPNOW      // ESP-NOW messages to other ESP32s
+#define USE_PIR         // PIR motion sensor
+#define USE_MPU6050     // MPU6050 tilt / acceleration
+#define USE_BUTTON      // Buttons (pressed? / when pressed)
+#define USE_SYSTEM      // Touch pins, uptime, free memory, save/load, deep sleep, I2C scan
+#define USE_TEMP        // ESP32 temperature + Wi-Fi dBm reporting
+// ======================================================
+
+// ------------------------- CONFIG -------------------------
+const char* WIFI_SSID = "your_wifi_name";
+const char* WIFI_PASS = "your_wifi_password";
+const int   LCD_ADDR  = 0x27; // I2C address of the 16x2 LCD (use "Scan I2C" block to find it)
+const int   OLED_ADDR = 0x3C; // I2C address of the OLED
+const int   MPU_ADDR  = 0x68; // I2C address of the MPU6050
+const int   BME_ADDR  = 0x76; // I2C address of the BMP280 / BME280 (some boards use 0x77)
+// ----------------------------------------------------------
+
+#include <WiFi.h>
+#include <WebSocketsServer.h>
+
+#if defined(USE_LCD) || defined(USE_OLED) || defined(USE_MPU6050) || defined(USE_SYSTEM) || \
+    defined(USE_BME) || defined(USE_TCS34725) || defined(USE_APDS9960) || defined(USE_RTC)
+  #include <Wire.h>
+#endif
+#ifdef USE_SERVO
+  #include <ESP32Servo.h>
+#endif
+#ifdef USE_RFID
+  #include <SPI.h>
+  #include <MFRC522.h>
+#endif
+#ifdef USE_LCD
+  #include <LiquidCrystal_I2C.h>
+#endif
+#ifdef USE_OLED
+  #include <Adafruit_GFX.h>
+  #include <Adafruit_SSD1306.h>
+#endif
+// (USE_MATRIX8X8 needs no library: the MAX7219 driver is built in below)
+#ifdef USE_TM1637
+  #include <TM1637Display.h>
+#endif
+#ifdef USE_KEYPAD
+  #include <Keypad.h>
+#endif
+#ifdef USE_NEOPIXEL
+  #include <Adafruit_NeoPixel.h>
+#endif
+#ifdef USE_IR
+  #include <IRremote.hpp>
+#endif
+#ifdef USE_DFPLAYER
+  #include <DFRobotDFPlayerMini.h>
+#endif
+#ifdef USE_DHT
+  #include <DHT.h>
+#endif
+#ifdef USE_DS18B20
+  #include <OneWire.h>
+  #include <DallasTemperature.h>
+#endif
+#ifdef USE_BME
+  #include <Adafruit_BMP280.h>
+  #include <Adafruit_BME280.h>
+#endif
+#ifdef USE_TCS34725
+  #include <Adafruit_TCS34725.h>
+#endif
+#ifdef USE_APDS9960
+  #include <Adafruit_APDS9960.h>
+#endif
+#ifdef USE_HX711
+  #include <HX711.h>
+#endif
+#ifdef USE_GPS
+  #include <TinyGPSPlus.h>
+#endif
+#ifdef USE_RTC
+  #include <RTClib.h>
+#endif
+#ifdef USE_HTTP
+  #include <HTTPClient.h>
+#endif
+#ifdef USE_ESPNOW
+  #include <esp_now.h>
+#endif
+#ifdef USE_SYSTEM
+  #include <Preferences.h>
+#endif
+
+WebSocketsServer wsServer(81);
+
+// ---------- state ----------
+#ifdef USE_SERVO
+Servo servos[8];
+int servoPins[8];
+int nServos = 0;
+bool servoTimersReady = false;
+#endif
+
+#if defined(USE_RGB) || defined(USE_NEOPIXEL)
+int rgbR = -1, rgbG = -1, rgbB = -1;
+#endif
+
+#ifdef USE_LCD
+LiquidCrystal_I2C* lcd = nullptr;
+int lcdSda = -1, lcdScl = -1;
+#endif
+
+#ifdef USE_OLED
+Adafruit_SSD1306* oled = nullptr;
+#endif
+
+#ifdef USE_MATRIX8X8
+// Minimal MAX7219 driver (replaces the LedControl library, which does not compile on ESP32)
+int mxDin = -1, mxClk = -1, mxCs = -1;
+byte mxRows[8];
+bool mxReady = false;
+
+void mxWrite(byte reg, byte val) {
+  digitalWrite(mxCs, LOW);
+  shiftOut(mxDin, mxClk, MSBFIRST, reg);
+  shiftOut(mxDin, mxClk, MSBFIRST, val);
+  digitalWrite(mxCs, HIGH);
+}
+void mxShow() {
+  for (int r = 0; r < 8; r++) mxWrite(r + 1, mxRows[r]);
+}
+void mxClear() {
+  for (int r = 0; r < 8; r++) mxRows[r] = 0;
+  mxShow();
+}
+#endif
+
+#ifdef USE_TM1637
+TM1637Display* tm = nullptr;
+int tmClk = -1, tmDio = -1;
+#endif
+
+#ifdef USE_JOYSTICK
+int joyX = -1, joyY = -1, joySW = -1;
+int lastJX = 9999, lastJY = 9999, lastJSW = 9999;
+#endif
+
+#ifdef USE_KEYPAD
+char keyMap[4][4] = {
+  { '1', '2', '3', 'A' },
+  { '4', '5', '6', 'B' },
+  { '7', '8', '9', 'C' },
+  { '*', '0', '#', 'D' }
+};
+byte kpRows[4], kpCols[4];
+Keypad* keypad = nullptr;
+#endif
+
+#ifdef USE_NEOPIXEL
+Adafruit_NeoPixel* strip = nullptr;
+int neoFx = 0;                 // 0 none, 1 rainbow, 2 chase, 3 blink
+uint32_t neoFxColor = 0;
+unsigned long neoFxInterval = 100, tNeo = 0;
+int neoStep = 0;
+#endif
+
+#ifdef USE_ROTARY
+volatile long rotPos = 0;
+long rotPrev = 0;                 // position at the last speed check
+long lastRotSpeed = 99999999;     // last speed sent (steps per second)
+unsigned long tRot = 0;
+int rotClk = -1, rotDt = -1;
+#endif
+
+#ifdef USE_IR
+int irPin = -1;
+#endif
+
+#ifdef USE_DFPLAYER
+DFRobotDFPlayerMini df;
+bool dfReady = false;
+#endif
+
+#ifdef USE_RFID
+MFRC522* rfid = nullptr;
+bool rfidTouching = false;
+unsigned long rfidLastSeen = 0;
+#endif
+
+#ifdef USE_ULTRASONIC
+int trigPin = -1, echoPin = -1;
+float lastDist = -1;
+#endif
+
+#ifdef USE_BUZZER
+int buzPin = -1;
+#endif
+
+#if defined(USE_PINS) || defined(USE_SYSTEM)
+struct Watch { int pin; int last; };
+#endif
+#ifdef USE_PINS
+Watch watchD[16]; int nWatchD = 0;
+Watch watchA[16]; int nWatchA = 0;
+struct Blink { int pin; unsigned long interval; unsigned long last; int level; bool active; };
+Blink blinks[4]; int nBlinks = 0;
+#endif
+#ifdef USE_SYSTEM
+Watch watchT[8]; int nWatchT = 0;
+Preferences prefs;
+#endif
+
+#ifdef USE_BUTTON
+struct Btn { int pin; int raw; int stable; unsigned long t; };
+Btn buttons[8]; int nButtons = 0;
+#endif
+
+#ifdef USE_DHT
+DHT* dht = nullptr;
+unsigned long tDHT = 0;
+#endif
+
+#ifdef USE_DS18B20
+OneWire* oneWire = nullptr;
+DallasTemperature* ds = nullptr;
+#endif
+
+#ifdef USE_BME
+Adafruit_BMP280* bmp = nullptr;
+Adafruit_BME280* bme = nullptr;
+unsigned long tEnv = 0;
+#endif
+
+#ifdef USE_TCS34725
+Adafruit_TCS34725* tcs = nullptr;
+unsigned long tCol = 0;
+#endif
+
+#ifdef USE_APDS9960
+Adafruit_APDS9960* apds = nullptr;
+unsigned long tPrx = 0;
+#endif
+
+#ifdef USE_HX711
+HX711* scale = nullptr;
+unsigned long tHX = 0;
+#endif
+
+#ifdef USE_GPS
+TinyGPSPlus gps;
+bool gpsOn = false;
+unsigned long tGPS = 0;
+#endif
+
+#ifdef USE_RTC
+RTC_DS3231* rtc = nullptr;
+unsigned long tRTC = 0;
+#endif
+
+#ifdef USE_NTP
+bool ntpOn = false;
+unsigned long tNTP = 0;
+#endif
+
+#ifdef USE_ESPNOW
+char nowBuf[220];
+char nowFrom[18];
+volatile bool nowNew = false;
+#endif
+
+#ifdef USE_PIR
+int pirPin = -1;
+int lastPir = -1;
+#endif
+
+#ifdef USE_MPU6050
+bool mpuReady = false;
+unsigned long tMPU = 0;
+#endif
+
+unsigned long tFast = 0, tSlow = 0;
+String serialBuf;
+
+// ---------- helpers ----------
+void sendWS(String m) { wsServer.broadcastTXT(m); }
+
+String urlDecode(const String& s) {
+  String o;
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '%' && i + 2 < s.length()) {
+      o += (char)strtol(s.substring(i + 1, i + 3).c_str(), NULL, 16);
+      i += 2;
+    } else o += c;
+  }
+  return o;
+}
+
+String urlEncode(const String& s) {
+  String o;
+  const char* hex = "0123456789ABCDEF";
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (isalnum(c) || c == '-' || c == '_' || c == '.') o += c;
+    else { o += '%'; o += hex[(c >> 4) & 15]; o += hex[c & 15]; }
+  }
+  return o;
+}
+
+#if defined(USE_RGB) || defined(USE_NEOPIXEL)
+uint32_t parseColor(const String& s) {
+  if (s.length() >= 7 && s[0] == '#') return strtoul(s.c_str() + 1, NULL, 16);
+  return 0;
+}
+#endif
+
+// OLED helpers: convert centred coordinates (0,0 = middle, y up) to screen pixels
+#ifdef USE_OLED
+int ox(int x) { return 64 + x; }
+int oy(int y) { return 32 - y; }
+#endif
+
+#ifdef USE_LCD
+void lcdInit(int sda, int scl) {
+  if (!lcd || sda != lcdSda || scl != lcdScl) {
+    Wire.begin(sda, scl);
+    if (lcd) delete lcd;
+    lcd = new LiquidCrystal_I2C(LCD_ADDR, 16, 2);
+    lcd->init(); lcd->backlight();
+    lcdSda = sda; lcdScl = scl;
+  }
+}
+#endif
+
+// ---------- rotary ISR ----------
+#ifdef USE_ROTARY
+void IRAM_ATTR rotISR() {
+  if (digitalRead(rotDt) != digitalRead(rotClk)) rotPos++;
+  else rotPos--;
+}
+#endif
+
+// ---------- ESP-NOW receive (Arduino-ESP32 core 3.x signature) ----------
+#ifdef USE_ESPNOW
+void onNowRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
+  if (len > 219) len = 219;
+  memcpy(nowBuf, data, len);
+  nowBuf[len] = 0;
+  snprintf(nowFrom, sizeof(nowFrom), "%02X:%02X:%02X:%02X:%02X:%02X",
+           info->src_addr[0], info->src_addr[1], info->src_addr[2],
+           info->src_addr[3], info->src_addr[4], info->src_addr[5]);
+  nowNew = true;
+}
+#endif
+
+// ---------- command handling ----------
+String A[12];
+int nA = 0;
+String arg(int i) { return i < nA ? A[i] : String(""); }
+
+void handleCommand(const String& line) {
+  nA = 0;
+  int start = 0;
+  while (nA < 12) {
+    int bar = line.indexOf('|', start);
+    if (bar < 0) { A[nA++] = urlDecode(line.substring(start)); break; }
+    A[nA++] = urlDecode(line.substring(start, bar));
+    start = bar + 1;
+  }
+  String cmd = A[0];
+  // shift args so arg(0) is the first real argument
+  for (int i = 0; i < nA - 1; i++) A[i] = A[i + 1];
+  nA--;
+
+  if (false) {}
+
+  // ----- always on -----
+  else if (cmd == "SERIAL") { Serial.println(arg(0)); }
+  else if (cmd == "RESET")  { delay(50); ESP.restart(); }
+  else if (cmd == "PING")   { sendWS("PONG|" + arg(0)); }
+
+#ifdef USE_PINS
+  else if (cmd == "DW") {
+    pinMode(arg(0).toInt(), OUTPUT);
+    digitalWrite(arg(0).toInt(), arg(1).toInt() ? HIGH : LOW);
+  }
+  else if (cmd == "AW") {
+    pinMode(arg(0).toInt(), OUTPUT);
+    analogWrite(arg(0).toInt(), constrain(arg(1).toInt(), 0, 255));
+  }
+  else if (cmd == "PWM") {
+    pinMode(arg(0).toInt(), OUTPUT);
+    analogWrite(arg(0).toInt(), (int)(arg(1).toFloat() * 255.0 / 100.0));
+  }
+  else if (cmd == "WATCHD") {
+    if (nWatchD < 16) { int p = arg(0).toInt(); pinMode(p, INPUT); watchD[nWatchD++] = { p, -1 }; }
+  }
+  else if (cmd == "WATCHA") {
+    if (nWatchA < 16) { int p = arg(0).toInt(); pinMode(p, INPUT); watchA[nWatchA++] = { p, -9999 }; }
+  }
+  else if (cmd == "BLINK") {
+    int p = arg(0).toInt();
+    int idx = -1;
+    for (int i = 0; i < nBlinks; i++) if (blinks[i].pin == p) { idx = i; break; }
+    if (idx < 0 && nBlinks < 4) idx = nBlinks++;
+    if (idx >= 0) {
+      pinMode(p, OUTPUT);
+      blinks[idx] = { p, (unsigned long)max(20, (int)arg(1).toInt()), millis(), LOW, true };
+    }
+  }
+  else if (cmd == "BLINKSTOP") {
+    int p = arg(0).toInt();
+    for (int i = 0; i < nBlinks; i++) if (blinks[i].pin == p && blinks[i].active) {
+      blinks[i].active = false;
+      digitalWrite(p, LOW);
+    }
+  }
+#endif
+
+#ifdef USE_SERVO
+  else if (cmd == "SERVO") {
+    int p = arg(1).toInt();
+    int idx = -1;
+    for (int i = 0; i < nServos; i++) if (servoPins[i] == p) { idx = i; break; }
+    if (idx < 0 && nServos < 8) {
+      if (!servoTimersReady) {
+        ESP32PWM::allocateTimer(0); ESP32PWM::allocateTimer(1);
+        ESP32PWM::allocateTimer(2); ESP32PWM::allocateTimer(3);
+        servoTimersReady = true;
+      }
+      idx = nServos++;
+      servoPins[idx] = p;
+      servos[idx].setPeriodHertz(50);
+      servos[idx].attach(p, 500, 2400);
+    }
+    if (idx >= 0) servos[idx].write(constrain(arg(0).toInt(), 0, 180));
+  }
+#endif
+
+#ifdef USE_RFID
+  else if (cmd == "RFIDSETUP") {
+    int sda = arg(0).toInt(), sck = arg(1).toInt(), mosi = arg(2).toInt(), miso = arg(3).toInt(), rst = arg(4).toInt();
+    SPI.begin(sck, miso, mosi, sda);
+    if (rfid) delete rfid;
+    rfid = new MFRC522(sda, rst);
+    rfid->PCD_Init();
+  }
+#endif
+
+#ifdef USE_ULTRASONIC
+  else if (cmd == "ULTRASETUP") {
+    trigPin = arg(0).toInt(); echoPin = arg(1).toInt();
+    pinMode(trigPin, OUTPUT); pinMode(echoPin, INPUT);
+  }
+#endif
+
+#ifdef USE_BUZZER
+  else if (cmd == "BUZSETUP") {
+    buzPin = arg(0).toInt(); pinMode(buzPin, OUTPUT);
+  }
+  else if (cmd == "TONE") {
+    if (buzPin >= 0) tone(buzPin, arg(0).toInt(), arg(1).toInt());
+  }
+  else if (cmd == "NOTONE") {
+    if (buzPin >= 0) noTone(buzPin);
+  }
+#endif
+
+#ifdef USE_RGB
+  else if (cmd == "RGB") {
+    rgbR = arg(0).toInt(); rgbG = arg(1).toInt(); rgbB = arg(2).toInt();
+    uint32_t c = parseColor(arg(3));
+    pinMode(rgbR, OUTPUT); pinMode(rgbG, OUTPUT); pinMode(rgbB, OUTPUT);
+    analogWrite(rgbR, (c >> 16) & 255);
+    analogWrite(rgbG, (c >> 8) & 255);
+    analogWrite(rgbB, c & 255);
+  }
+#endif
+
+#ifdef USE_LCD
+  else if (cmd == "LCD") {
+    lcdInit(arg(0).toInt(), arg(1).toInt());
+    String t = arg(2);
+    lcd->clear();
+    lcd->setCursor(0, 0); lcd->print(t.substring(0, 16));
+    if (t.length() > 16) { lcd->setCursor(0, 1); lcd->print(t.substring(16, 32)); }
+  }
+  else if (cmd == "LCDSETUP") {
+    lcdInit(arg(0).toInt(), arg(1).toInt());
+  }
+  else if (cmd == "LCDLINE") {
+    if (lcd) {
+      int line = constrain(arg(0).toInt(), 1, 2) - 1;
+      String t = arg(1).substring(0, 16);
+      while (t.length() < 16) t += ' ';      // pad so old text is overwritten
+      lcd->setCursor(0, line);
+      lcd->print(t);
+    }
+  }
+  else if (cmd == "LCDCLEAR") { if (lcd) lcd->clear(); }
+  else if (cmd == "LCDLIGHT") {
+    if (lcd) { if (arg(0).toInt()) lcd->backlight(); else lcd->noBacklight(); }
+  }
+#endif
+
+#ifdef USE_OLED
+  else if (cmd == "OLEDSETUP") {
+    Wire.begin(arg(0).toInt(), arg(1).toInt());
+    if (oled) delete oled;
+    oled = new Adafruit_SSD1306(128, 64, &Wire, -1);
+    if (oled->begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) { oled->clearDisplay(); oled->display(); }
+  }
+  else if (cmd == "OLEDTEXT") {
+    // text is centred on (x, y)
+    if (oled) {
+      String t = arg(0);
+      oled->setTextSize(constrain(arg(3).toInt(), 1, 8));
+      oled->setTextColor(SSD1306_WHITE);
+      int16_t bx, by; uint16_t bw, bh;
+      oled->getTextBounds(t, 0, 0, &bx, &by, &bw, &bh);
+      int left = ox(arg(1).toInt()) - (int)bw / 2;
+      int top  = oy(arg(2).toInt()) - (int)bh / 2;
+      oled->fillRect(left, top, bw, bh, SSD1306_BLACK);   // erase what was under the text
+      oled->setCursor(left - bx, top - by);
+      oled->print(t);
+      oled->display();
+    }
+  }
+  else if (cmd == "OLEDLINE") {
+    if (oled) {
+      oled->drawLine(ox(arg(0).toInt()), oy(arg(1).toInt()), ox(arg(2).toInt()), oy(arg(3).toInt()), SSD1306_WHITE);
+      oled->display();
+    }
+  }
+  else if (cmd == "OLEDRECT") {
+    if (oled) {
+      int w = max(1, (int)arg(2).toInt()), h = max(1, (int)arg(3).toInt());
+      int left = ox(arg(0).toInt()) - w / 2, top = oy(arg(1).toInt()) - h / 2;
+      if (arg(4).toInt()) oled->fillRect(left, top, w, h, SSD1306_WHITE);
+      else oled->drawRect(left, top, w, h, SSD1306_WHITE);
+      oled->display();
+    }
+  }
+  else if (cmd == "OLEDCIRCLE") {
+    if (oled) {
+      int r = max(1, (int)arg(2).toInt());
+      if (arg(3).toInt()) oled->fillCircle(ox(arg(0).toInt()), oy(arg(1).toInt()), r, SSD1306_WHITE);
+      else oled->drawCircle(ox(arg(0).toInt()), oy(arg(1).toInt()), r, SSD1306_WHITE);
+      oled->display();
+    }
+  }
+  else if (cmd == "OLEDBAR") {
+    if (oled) {
+      int w = max(3, (int)arg(2).toInt()), h = max(3, (int)arg(3).toInt());
+      int left = ox(arg(0).toInt()) - w / 2, top = oy(arg(1).toInt()) - h / 2;
+      int pct = constrain(arg(4).toInt(), 0, 100);
+      oled->fillRect(left, top, w, h, SSD1306_BLACK);
+      oled->drawRect(left, top, w, h, SSD1306_WHITE);
+      int fillW = (w - 4) * pct / 100;
+      if (fillW > 0) oled->fillRect(left + 2, top + 2, fillW, h - 4, SSD1306_WHITE);
+      oled->display();
+    }
+  }
+  else if (cmd == "OLEDCLEAR") {
+    if (oled) { oled->clearDisplay(); oled->display(); }
+  }
+#endif
+
+#ifdef USE_MATRIX8X8
+  else if (cmd == "MXSETUP") {
+    mxDin = arg(0).toInt(); mxClk = arg(1).toInt(); mxCs = arg(2).toInt();   // DIN, CLK, CS
+    pinMode(mxDin, OUTPUT); pinMode(mxClk, OUTPUT); pinMode(mxCs, OUTPUT);
+    digitalWrite(mxCs, HIGH);
+    mxWrite(0x0F, 0x00);   // display test off
+    mxWrite(0x09, 0x00);   // no BCD decode
+    mxWrite(0x0B, 0x07);   // scan all 8 digits
+    mxWrite(0x0A, 0x08);   // brightness 8
+    mxWrite(0x0C, 0x01);   // normal operation (shutdown off)
+    mxReady = true;
+    mxClear();
+  }
+  else if (cmd == "MXPATTERN") {
+    if (mxReady) {
+      for (int r = 0; r < 8; r++) {
+        String row = arg(r);
+        byte b = 0;
+        for (int c = 0; c < 8 && c < (int)row.length(); c++) if (row[c] == '1') b |= (0x80 >> c);
+        mxRows[r] = b;
+      }
+      mxShow();
+    }
+  }
+  else if (cmd == "MXLED") {
+    // x 1..8 left to right, y 1..8 top to bottom
+    if (mxReady) {
+      int x = constrain(arg(0).toInt(), 1, 8) - 1, y = constrain(arg(1).toInt(), 1, 8) - 1;
+      byte bit = 0x80 >> (7 - x);   // same bit the LedControl library used
+      if (arg(2).toInt()) mxRows[y] |= bit; else mxRows[y] &= ~bit;
+      mxWrite(y + 1, mxRows[y]);
+    }
+  }
+  else if (cmd == "MXCLEAR")  { if (mxReady) mxClear(); }
+  else if (cmd == "MXBRIGHT") { if (mxReady) mxWrite(0x0A, constrain(arg(0).toInt(), 0, 15)); }
+#endif
+
+#ifdef USE_TM1637
+  else if (cmd == "TMSHOW") {
+    int clk = arg(1).toInt(), dio = arg(2).toInt();
+    if (!tm || clk != tmClk || dio != tmDio) {
+      if (tm) delete tm;
+      tm = new TM1637Display(clk, dio);
+      tm->setBrightness(7);
+      tmClk = clk; tmDio = dio;
+    }
+    tm->showNumberDec(arg(0).toInt());
+  }
+#endif
+
+#ifdef USE_JOYSTICK
+  else if (cmd == "JOYSETUP") {
+    joyX = arg(0).toInt(); joyY = arg(1).toInt(); joySW = arg(2).toInt();
+    pinMode(joySW, INPUT_PULLUP);
+  }
+#endif
+
+#ifdef USE_KEYPAD
+  else if (cmd == "KEYSETUP") {
+    for (int i = 0; i < 4; i++) { kpRows[i] = arg(i).toInt(); kpCols[i] = arg(4 + i).toInt(); }
+    if (keypad) delete keypad;
+    keypad = new Keypad(makeKeymap(keyMap), kpRows, kpCols, 4, 4);
+  }
+#endif
+
+#ifdef USE_NEOPIXEL
+  else if (cmd == "NEOSETUP") {
+    if (strip) delete strip;
+    strip = new Adafruit_NeoPixel(arg(0).toInt(), arg(1).toInt(), NEO_GRB + NEO_KHZ800);
+    strip->begin(); strip->show();
+    neoFx = 0;
+  }
+  else if (cmd == "NEOSET") {
+    if (strip) { neoFx = 0; strip->setPixelColor(arg(0).toInt(), parseColor(arg(1))); strip->show(); }
+  }
+  else if (cmd == "NEOALL") {
+    if (strip) { neoFx = 0; strip->fill(parseColor(arg(0))); strip->show(); }
+  }
+  else if (cmd == "NEOBRIGHT") {
+    if (strip) { strip->setBrightness((uint8_t)(constrain(arg(0).toInt(), 0, 100) * 255 / 100)); strip->show(); }
+  }
+  else if (cmd == "NEOFX") {
+    if (strip) {
+      String e = arg(0);
+      neoFxColor = parseColor(arg(1));
+      int speed = constrain(arg(2).toInt(), 1, 10);
+      neoFxInterval = max(15, 330 / speed);          // speed 10 = 33 ms, speed 1 = 330 ms
+      neoStep = 0; tNeo = 0;
+      if (e == "rainbow") neoFx = 1;
+      else if (e == "chase") neoFx = 2;
+      else if (e == "blink") neoFx = 3;
+      else { neoFx = 0; strip->clear(); strip->show(); }
+    }
+  }
+#endif
+
+#if defined(USE_RGB) || defined(USE_NEOPIXEL)
+  else if (cmd == "LEDSOFF") {
+  #ifdef USE_RGB
+    if (rgbR >= 0) { analogWrite(rgbR, 0); analogWrite(rgbG, 0); analogWrite(rgbB, 0); }
+  #endif
+  #ifdef USE_NEOPIXEL
+    if (strip) { neoFx = 0; strip->clear(); strip->show(); }
+  #endif
+  }
+#endif
+
+#ifdef USE_ROTARY
+  else if (cmd == "ROTSETUP") {
+    if (rotClk >= 0) detachInterrupt(rotClk);
+    rotClk = arg(0).toInt(); rotDt = arg(1).toInt();
+    pinMode(rotClk, INPUT_PULLUP); pinMode(rotDt, INPUT_PULLUP);
+    attachInterrupt(rotClk, rotISR, CHANGE);
+  }
+#endif
+
+#ifdef USE_IR
+  else if (cmd == "WATCHIR") {
+    irPin = arg(0).toInt();
+    IrReceiver.begin(irPin, DISABLE_LED_FEEDBACK);
+  }
+#endif
+
+#ifdef USE_DFPLAYER
+  else if (cmd == "DFSETUP") {
+    int txPin = arg(0).toInt(), rxPin = arg(1).toInt();
+    Serial2.begin(9600, SERIAL_8N1, rxPin, txPin);
+    dfReady = df.begin(Serial2);
+  }
+  else if (cmd == "DFPLAY") { if (dfReady) df.play(arg(0).toInt()); }
+  else if (cmd == "DFVOL")  { if (dfReady) df.volume(constrain(arg(0).toInt(), 0, 30)); }
+#endif
+
+#ifdef USE_DHT
+  else if (cmd == "DHTSETUP") {
+    if (dht) delete dht;
+    dht = new DHT(arg(0).toInt(), arg(1).toInt());  // type: 11 or 22
+    dht->begin();
+  }
+#endif
+
+#ifdef USE_DS18B20
+  else if (cmd == "DSSETUP") {
+    if (ds) delete ds;
+    if (oneWire) delete oneWire;
+    oneWire = new OneWire(arg(0).toInt());
+    ds = new DallasTemperature(oneWire);
+    ds->begin();
+    ds->setWaitForConversion(false);
+    ds->requestTemperatures();
+  }
+#endif
+
+#ifdef USE_BME
+  else if (cmd == "ENVSETUP") {
+    // args: type (BMP280 / BME280), SDA, SCL
+    Wire.begin(arg(1).toInt(), arg(2).toInt());
+    if (bmp) { delete bmp; bmp = nullptr; }
+    if (bme) { delete bme; bme = nullptr; }
+    if (arg(0) == "BME280") {
+      bme = new Adafruit_BME280();
+      if (!bme->begin(BME_ADDR, &Wire)) { delete bme; bme = nullptr; Serial.println("BME280 not found"); }
+    } else {
+      bmp = new Adafruit_BMP280(&Wire);
+      if (!bmp->begin(BME_ADDR)) { delete bmp; bmp = nullptr; Serial.println("BMP280 not found"); }
+    }
+  }
+#endif
+
+#ifdef USE_TCS34725
+  else if (cmd == "COLSETUP") {
+    Wire.begin(arg(0).toInt(), arg(1).toInt());
+    if (tcs) delete tcs;
+    tcs = new Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+    if (!tcs->begin()) { delete tcs; tcs = nullptr; Serial.println("TCS34725 not found"); }
+  }
+#endif
+
+#ifdef USE_APDS9960
+  else if (cmd == "GESSETUP") {
+    Wire.begin(arg(0).toInt(), arg(1).toInt());
+    if (apds) delete apds;
+    apds = new Adafruit_APDS9960();
+    if (apds->begin()) { apds->enableProximity(true); apds->enableGesture(true); }
+    else { delete apds; apds = nullptr; Serial.println("APDS9960 not found"); }
+  }
+#endif
+
+#ifdef USE_HX711
+  else if (cmd == "HXSETUP") {
+    if (scale) delete scale;
+    scale = new HX711();
+    scale->begin(arg(0).toInt(), arg(1).toInt());   // DT, SCK
+    scale->set_scale(1.0f);
+    scale->tare();
+  }
+  else if (cmd == "HXTARE") { if (scale) scale->tare(); }
+  else if (cmd == "HXCAL")  { if (scale) scale->set_scale(arg(0).toFloat()); }
+#endif
+
+#ifdef USE_GPS
+  else if (cmd == "GPSSETUP") {
+    Serial1.begin(9600, SERIAL_8N1, arg(0).toInt(), arg(1).toInt());   // RX, TX
+    gpsOn = true;
+  }
+#endif
+
+#ifdef USE_RTC
+  else if (cmd == "RTCSETUP") {
+    Wire.begin(arg(0).toInt(), arg(1).toInt());
+    if (rtc) delete rtc;
+    rtc = new RTC_DS3231();
+    if (!rtc->begin(&Wire)) { delete rtc; rtc = nullptr; Serial.println("DS3231 not found"); }
+  }
+  else if (cmd == "RTCSET") {
+    if (rtc) rtc->adjust(DateTime(arg(0).toInt(), arg(1).toInt(), arg(2).toInt(),
+                                  arg(3).toInt(), arg(4).toInt(), arg(5).toInt()));
+  }
+#endif
+
+#ifdef USE_NTP
+  else if (cmd == "NTPSYNC") {
+    configTime(arg(0).toInt(), 0, "pool.ntp.org", "time.nist.gov");   // UTC offset in seconds
+    ntpOn = true;
+  }
+#endif
+
+#ifdef USE_HTTP
+  else if (cmd == "HTTPGET") {
+    HTTPClient http;
+    http.setTimeout(5000);
+    int code = -1;
+    String body;
+    if (http.begin(arg(0))) {
+      code = http.GET();
+      if (code > 0) body = http.getString();
+      http.end();
+    }
+    if (body.length() > 400) body = body.substring(0, 400);
+    sendWS("HTTP|" + String(code) + "|" + urlEncode(body));
+  }
+#endif
+
+#ifdef USE_ESPNOW
+  else if (cmd == "NOWSEND") {
+    uint8_t mac[6];
+    String m = arg(0);
+    if (sscanf(m.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+      if (!esp_now_is_peer_exist(mac)) {
+        esp_now_peer_info_t peer = {};
+        memcpy(peer.peer_addr, mac, 6);
+        peer.channel = 0;
+        peer.encrypt = false;
+        esp_now_add_peer(&peer);
+      }
+      String msg = arg(1);
+      if (msg.length() > 200) msg = msg.substring(0, 200);
+      esp_now_send(mac, (const uint8_t*)msg.c_str(), msg.length());
+    }
+  }
+#endif
+
+#ifdef USE_PIR
+  else if (cmd == "PIRSETUP") {
+    pirPin = arg(0).toInt(); pinMode(pirPin, INPUT); lastPir = -1;
+  }
+#endif
+
+#ifdef USE_MPU6050
+  else if (cmd == "MPUSETUP") {
+    Wire.begin(arg(0).toInt(), arg(1).toInt());
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x6B); Wire.write(0);          // wake up
+    mpuReady = (Wire.endTransmission() == 0);
+  }
+#endif
+
+#ifdef USE_BUTTON
+  else if (cmd == "WATCHB") {
+    if (nButtons < 8) {
+      int p = arg(0).toInt();
+      pinMode(p, INPUT_PULLUP);
+      buttons[nButtons++] = { p, HIGH, HIGH, 0 };
+    }
+  }
+#endif
+
+#ifdef USE_SYSTEM
+  else if (cmd == "WATCHT") {
+    if (nWatchT < 8) watchT[nWatchT++] = { arg(0).toInt(), -9999 };
+  }
+  else if (cmd == "SAVE") {
+    prefs.begin("scratch", false);
+    prefs.putString(arg(0).substring(0, 15).c_str(), arg(1));
+    prefs.end();
+  }
+  else if (cmd == "LOAD") {
+    prefs.begin("scratch", true);
+    String v = prefs.getString(arg(0).substring(0, 15).c_str(), "");
+    prefs.end();
+    sendWS("VAL|" + urlEncode(arg(0)) + "|" + urlEncode(v));
+  }
+  else if (cmd == "SLEEP") {
+    esp_sleep_enable_timer_wakeup((uint64_t)arg(0).toInt() * 1000000ULL);
+    esp_deep_sleep_start();
+  }
+  else if (cmd == "I2CSCAN") {
+    Wire.begin(arg(0).toInt(), arg(1).toInt());
+    String found;
+    for (int a = 1; a < 127; a++) {
+      Wire.beginTransmission(a);
+      if (Wire.endTransmission() == 0) {
+        if (found.length()) found += ",";
+        found += "0x";
+        if (a < 16) found += "0";
+        String h = String(a, HEX); h.toUpperCase();
+        found += h;
+      }
+    }
+    sendWS("I2C|" + urlEncode(found));
+  }
+#endif
+}
+
+void onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  if (type == WStype_TEXT) {
+    handleCommand(String((char*)payload));
+  } else if (type == WStype_CONNECTED) {
+    Serial.println("Client connected");
+    // force a refresh of all values for the new client
+#ifdef USE_JOYSTICK
+    lastJX = lastJY = lastJSW = 9999;
+#endif
+#ifdef USE_ROTARY
+    lastRotSpeed = 99999999;
+#endif
+#ifdef USE_ULTRASONIC
+    lastDist = -1;
+#endif
+#ifdef USE_PINS
+    for (int i = 0; i < nWatchD; i++) watchD[i].last = -1;
+    for (int i = 0; i < nWatchA; i++) watchA[i].last = -9999;
+#endif
+#ifdef USE_SYSTEM
+    for (int i = 0; i < nWatchT; i++) watchT[i].last = -9999;
+#endif
+#ifdef USE_PIR
+    lastPir = -1;
+#endif
+  }
+}
+
+// ---------- setup / loop ----------
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.print("Connecting to WiFi");
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) { delay(300); Serial.print("."); }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nIP address: " + WiFi.localIP().toString());
+  } else {
+    // fall back to an access point so you can still connect
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("ESP32-Scratch");
+    Serial.println("\nWiFi failed. Access point 'ESP32-Scratch' started, IP: " + WiFi.softAPIP().toString());
+  }
+  wsServer.begin();
+  wsServer.onEvent(onWsEvent);
+#ifdef USE_ESPNOW
+  if (esp_now_init() == ESP_OK) esp_now_register_recv_cb(onNowRecv);
+  else Serial.println("ESP-NOW init failed");
+#endif
+}
+
+void loop() {
+  wsServer.loop();
+  unsigned long now = millis();
+
+  // ---- text typed in the Serial Monitor (send with newline) ----
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      if (serialBuf.length()) sendWS("SER|" + urlEncode(serialBuf));
+      serialBuf = "";
+    } else if (c != '\r' && serialBuf.length() < 200) serialBuf += c;
+  }
+
+#ifdef USE_IR
+  // ---- IR (every loop) ----
+  if (irPin >= 0 && IrReceiver.decode()) {
+    if (!(IrReceiver.decodedIRData.flags & IRDATA_FLAGS_WAS_OVERFLOW) &&
+        !(IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT)) {
+      String code = String((uint32_t)IrReceiver.decodedIRData.decodedRawData, HEX);
+      code.toUpperCase();
+      sendWS("IR|" + String(irPin) + "|" + urlEncode("0x" + code));
+    }
+    IrReceiver.resume();
+  }
+#endif
+
+#ifdef USE_KEYPAD
+  // ---- keypad (every loop) ----
+  if (keypad) {
+    char k = keypad->getKey();
+    if (k) sendWS("KEY|" + urlEncode(String(k)));
+  }
+#endif
+
+#ifdef USE_BUTTON
+  // ---- buttons with 30 ms debounce (every loop) ----
+  for (int i = 0; i < nButtons; i++) {
+    int r = digitalRead(buttons[i].pin);
+    if (r != buttons[i].raw) { buttons[i].raw = r; buttons[i].t = now; }
+    if (now - buttons[i].t >= 30 && buttons[i].stable != buttons[i].raw) {
+      buttons[i].stable = buttons[i].raw;
+      sendWS("BTN|" + String(buttons[i].pin) + "|" + String(buttons[i].stable == LOW ? 1 : 0));
+    }
+  }
+#endif
+
+#ifdef USE_PINS
+  // ---- blinking pins ----
+  for (int i = 0; i < nBlinks; i++) {
+    if (blinks[i].active && now - blinks[i].last >= blinks[i].interval) {
+      blinks[i].last = now;
+      blinks[i].level = !blinks[i].level;
+      digitalWrite(blinks[i].pin, blinks[i].level);
+    }
+  }
+#endif
+
+#ifdef USE_NEOPIXEL
+  // ---- NeoPixel effects ----
+  if (strip && neoFx && now - tNeo >= neoFxInterval) {
+    tNeo = now;
+    int n = strip->numPixels();
+    if (neoFx == 1) {                                  // rainbow
+      for (int i = 0; i < n; i++) {
+        uint16_t hue = (uint16_t)((uint32_t)i * 65536UL / n + (uint32_t)neoStep * 1024UL);
+        strip->setPixelColor(i, strip->gamma32(strip->ColorHSV(hue)));
+      }
+    } else if (neoFx == 2) {                           // chase
+      strip->clear();
+      strip->setPixelColor(neoStep % n, neoFxColor);
+    } else if (neoFx == 3) {                           // blink
+      if (neoStep & 1) strip->clear(); else strip->fill(neoFxColor);
+    }
+    strip->show();
+    neoStep++;
+  }
+#endif
+
+#ifdef USE_GPS
+  // ---- GPS: feed the parser (every loop) ----
+  if (gpsOn) while (Serial1.available()) gps.encode(Serial1.read());
+#endif
+
+#ifdef USE_ESPNOW
+  if (nowNew) {
+    nowNew = false;
+    sendWS("NOW|" + urlEncode(String(nowFrom)) + "|" + urlEncode(String(nowBuf)));
+  }
+#endif
+
+  // ---- fast sensors (every 50 ms) ----
+  if (now - tFast >= 50) {
+    tFast = now;
+
+#ifdef USE_JOYSTICK
+    if (joyX >= 0) {
+      int x = map(analogRead(joyX), 0, 4095, -100, 100);
+      int y = map(analogRead(joyY), 0, 4095, -100, 100);
+      int sw = digitalRead(joySW) == LOW ? 1 : 0;
+      if (abs(x - lastJX) >= 2 || abs(y - lastJY) >= 2 || sw != lastJSW) {
+        lastJX = x; lastJY = y; lastJSW = sw;
+        sendWS("JOY|" + String(x) + "|" + String(y) + "|" + String(sw));
+      }
+    }
+#endif
+
+#ifdef USE_ROTARY
+    // Rotary speed: steps per second, + for clockwise, - for counter-clockwise,
+    // 0 when not turning. Measured over 100 ms windows.
+    if (rotClk >= 0 && now - tRot >= 100) {
+      long p = rotPos;
+      long speed = (p - rotPrev) * 1000L / (long)(now - tRot);
+      rotPrev = p;
+      tRot = now;
+      if (speed != lastRotSpeed) {
+        lastRotSpeed = speed;
+        sendWS("ROT|" + String(speed));
+      }
+    }
+#endif
+
+#ifdef USE_PINS
+    for (int i = 0; i < nWatchD; i++) {
+      int v = digitalRead(watchD[i].pin);
+      if (v != watchD[i].last) { watchD[i].last = v; sendWS("DR|" + String(watchD[i].pin) + "|" + String(v)); }
+    }
+    for (int i = 0; i < nWatchA; i++) {
+      int v = analogRead(watchA[i].pin);
+      if (abs(v - watchA[i].last) >= 8) { watchA[i].last = v; sendWS("AR|" + String(watchA[i].pin) + "|" + String(v)); }
+    }
+#endif
+
+#ifdef USE_SYSTEM
+    for (int i = 0; i < nWatchT; i++) {
+      int v = touchRead(watchT[i].pin);
+      if (abs(v - watchT[i].last) >= 2) { watchT[i].last = v; sendWS("TC|" + String(watchT[i].pin) + "|" + String(v)); }
+    }
+#endif
+
+#ifdef USE_PIR
+    if (pirPin >= 0) {
+      int v = digitalRead(pirPin);
+      if (v != lastPir) { lastPir = v; sendWS("PIR|" + String(v)); }
+    }
+#endif
+
+#ifdef USE_ULTRASONIC
+    if (trigPin >= 0) {
+      digitalWrite(trigPin, LOW); delayMicroseconds(2);
+      digitalWrite(trigPin, HIGH); delayMicroseconds(10);
+      digitalWrite(trigPin, LOW);
+      long dur = pulseIn(echoPin, HIGH, 25000);
+      if (dur > 0) {
+        float cm = round(dur * 0.0343f / 2.0f * 10.0f) / 10.0f;
+        if (fabs(cm - lastDist) >= 0.2f) { lastDist = cm; sendWS("DIST|" + String(cm, 1)); }
+      }
+    }
+#endif
+
+#ifdef USE_RFID
+    if (rfid) {
+      byte atqa[2]; byte sz = sizeof(atqa);
+      MFRC522::StatusCode st = rfid->PICC_WakeupA(atqa, &sz);
+      if ((st == MFRC522::STATUS_OK || st == MFRC522::STATUS_COLLISION) && rfid->PICC_ReadCardSerial()) {
+        rfidLastSeen = now;
+        if (!rfidTouching) {
+          rfidTouching = true;
+          String uid;
+          for (byte i = 0; i < rfid->uid.size; i++) { if (rfid->uid.uidByte[i] < 0x10) uid += "0"; uid += String(rfid->uid.uidByte[i], HEX); }
+          uid.toUpperCase();
+          sendWS("RFID|1|" + uid);
+        }
+        rfid->PICC_HaltA();
+      } else if (rfidTouching && now - rfidLastSeen > 600) {
+        rfidTouching = false;
+        sendWS("RFID|0|");
+      }
+    }
+#endif
+  }
+
+#ifdef USE_APDS9960
+  // ---- gesture (every loop) + proximity (every 200 ms) ----
+  if (apds) {
+    uint8_t g = apds->readGesture();
+    if (g == APDS9960_UP)         sendWS("GES|up");
+    else if (g == APDS9960_DOWN)  sendWS("GES|down");
+    else if (g == APDS9960_LEFT)  sendWS("GES|left");
+    else if (g == APDS9960_RIGHT) sendWS("GES|right");
+    if (now - tPrx >= 200) { tPrx = now; sendWS("PRX|" + String(apds->readProximity())); }
+  }
+#endif
+
+#ifdef USE_MPU6050
+  // ---- MPU6050 (every 100 ms) ----
+  if (mpuReady && now - tMPU >= 100) {
+    tMPU = now;
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x3B);
+    Wire.endTransmission(false);
+    if (Wire.requestFrom(MPU_ADDR, 6) == 6) {
+      int16_t rx = (Wire.read() << 8) | Wire.read();
+      int16_t ry = (Wire.read() << 8) | Wire.read();
+      int16_t rz = (Wire.read() << 8) | Wire.read();
+      float ax = rx / 16384.0f, ay = ry / 16384.0f, az = rz / 16384.0f;
+      float roll  = atan2(ay, az) * 57.2958f;
+      float pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 57.2958f;
+      sendWS("MPU|" + String(ax, 2) + "|" + String(ay, 2) + "|" + String(az, 2) + "|" + String(roll, 1) + "|" + String(pitch, 1));
+    }
+  }
+#endif
+
+#ifdef USE_TCS34725
+  // ---- color sensor (every 250 ms) ----
+  if (tcs && now - tCol >= 250) {
+    tCol = now;
+    float r, g, b;
+    tcs->getRGB(&r, &g, &b);
+    sendWS("COL|" + String(r, 0) + "|" + String(g, 0) + "|" + String(b, 0));
+  }
+#endif
+
+#ifdef USE_HX711
+  // ---- scale (every 300 ms) ----
+  if (scale && now - tHX >= 300) {
+    tHX = now;
+    if (scale->is_ready()) sendWS("HX|" + String(scale->get_units(1), 1));
+  }
+#endif
+
+#ifdef USE_BME
+  // ---- BMP280 / BME280 (every 1 s) ----
+  if ((bmp || bme) && now - tEnv >= 1000) {
+    tEnv = now;
+    if (bme) {
+      sendWS("ENV|" + String(bme->readTemperature(), 1) + "|" + String(bme->readPressure() / 100.0f, 1) + "|" +
+             String(bme->readAltitude(1013.25f), 1) + "|" + String(bme->readHumidity(), 1));
+    } else {
+      sendWS("ENV|" + String(bmp->readTemperature(), 1) + "|" + String(bmp->readPressure() / 100.0f, 1) + "|" +
+             String(bmp->readAltitude(1013.25f), 1) + "|0");
+    }
+  }
+#endif
+
+#ifdef USE_DHT
+  // ---- DHT (every 2 s) ----
+  if (dht && now - tDHT >= 2000) {
+    tDHT = now;
+    float t = dht->readTemperature(), h = dht->readHumidity();
+    if (!isnan(t) && !isnan(h)) sendWS("DHT|" + String(t, 1) + "|" + String(h, 1));
+  }
+#endif
+
+#ifdef USE_GPS
+  // ---- GPS values (every 1 s) ----
+  if (gpsOn && now - tGPS >= 1000) {
+    tGPS = now;
+    sendWS("GPS|" + String(gps.location.isValid() ? gps.location.lat() : 0.0, 6) + "|" +
+           String(gps.location.isValid() ? gps.location.lng() : 0.0, 6) + "|" +
+           String(gps.speed.isValid() ? gps.speed.kmph() : 0.0, 1) + "|" +
+           String(gps.satellites.isValid() ? gps.satellites.value() : 0) + "|" +
+           String(gps.altitude.isValid() ? gps.altitude.meters() : 0.0, 1));
+  }
+#endif
+
+#ifdef USE_RTC
+  // ---- DS3231 clock (every 1 s) ----
+  if (rtc && now - tRTC >= 1000) {
+    tRTC = now;
+    DateTime n = rtc->now();
+    sendWS("RTC|" + String(n.year()) + "|" + String(n.month()) + "|" + String(n.day()) + "|" +
+           String(n.hour()) + "|" + String(n.minute()) + "|" + String(n.second()) + "|" + String(n.dayOfTheWeek()));
+  }
+#endif
+
+#ifdef USE_NTP
+  // ---- internet time (every 1 s once synced) ----
+  if (ntpOn && now - tNTP >= 1000) {
+    tNTP = now;
+    struct tm ti;
+    if (getLocalTime(&ti, 10)) {
+      sendWS("NTP|" + String(ti.tm_year + 1900) + "|" + String(ti.tm_mon + 1) + "|" + String(ti.tm_mday) + "|" +
+             String(ti.tm_hour) + "|" + String(ti.tm_min) + "|" + String(ti.tm_sec) + "|" + String(ti.tm_wday));
+    }
+  }
+#endif
+
+  // ---- slow values (every 1 s) ----
+  if (now - tSlow >= 1000) {
+    tSlow = now;
+    sendWS("MAC|" + WiFi.macAddress());
+#ifdef USE_TEMP
+    sendWS("TEMP|" + String(temperatureRead(), 1));
+    sendWS("RSSI|" + String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0));
+#endif
+#ifdef USE_SYSTEM
+    sendWS("SYS|" + String(millis() / 1000) + "|" + String(ESP.getFreeHeap()));
+#endif
+#ifdef USE_DS18B20
+    if (ds) {
+      float t = ds->getTempCByIndex(0);   // result of the previous request
+      ds->requestTemperatures();
+      if (t > -100) sendWS("DS|" + String(t, 1));
+    }
+#endif
+  }
+}
